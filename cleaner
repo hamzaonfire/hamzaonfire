@@ -283,7 +283,7 @@ static void EnableConsole() {
 }
 
 static void PrintBanner() {
-    std::cout << RED;
+    std::cout << BLUE;
     std::cout << "____________  _____ _                            \n";
     std::cout << "|  _  \\  _  \\/  __ \\ |                           \n";
     std::cout << "| | | | | | || /  \\/ | ___  __ _ _ __   ___ _ __ \n";
