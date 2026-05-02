@@ -1,0 +1,338 @@
+#define NOMINMAX
+#include <windows.h>
+#include <tlhelp32.h>
+#include <psapi.h>
+#include <array>
+
+#include <algorithm>
+#include <cstdint>
+#include <iomanip>
+#include <iostream>
+#include <random>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#pragma comment(lib, "psapi.lib")
+
+std::vector<std::string> TARGET_STRINGS = {
+    "JJJJnnnn",
+    "VURwU",
+    "iTxHWpLAud",
+    "mz42dq",
+    "&ARw`aXPUMQ8p",
+    "pHaPUMq",
+    "SEkQGOMFk]gRcHy`LH^",
+    "!>BGY#%/no",
+    "!e31[Mn.d'!",
+    "!hi!kGD@<nS",
+    "q1qK 8[!U8",
+    "\"My ^ f1`@ > E\"",
+    "#-=yL&yn`R",
+    "#d+[06\"oj:Uy0la",
+    "%#ksghCP$NIS7$EQuX",
+    "%@])c@[u6g6mCf1(",
+    "puMq^S^HZt",
+    "mGaYm",
+};
+
+constexpr DWORD REQUIRED_ACCESS = PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION;
+
+enum class FillMode { Zeros, Ones, Random };
+
+struct ScrubConfig {
+    std::wstring processName = L"javaw.exe";
+    std::vector<std::string> targetStrings = TARGET_STRINGS;
+    FillMode fillMode = FillMode::Random;
+    bool verbose = false;
+    bool dryRun = false;
+};
+
+struct ScrubResult {
+    bool found = false;
+    size_t asciiMatches = 0;
+    size_t wideMatches = 0;
+    size_t writeFailures = 0;
+    DWORD64 elapsedMs = 0;
+    size_t regionsScanned = 0;
+    size_t regionsSkipped = 0;
+    size_t bytesScanned = 0;
+
+    size_t TotalMatches() const { return asciiMatches + wideMatches; }
+};
+
+struct ProcessEntry {
+    DWORD pid = 0;
+    std::wstring name;
+};
+
+class SafeHandle {
+public:
+    explicit SafeHandle(HANDLE h = INVALID_HANDLE_VALUE) noexcept : h_(h) {}
+    ~SafeHandle() noexcept { if (h_ && h_ != INVALID_HANDLE_VALUE) CloseHandle(h_); }
+    SafeHandle(SafeHandle&& o) noexcept : h_(o.h_) { o.h_ = INVALID_HANDLE_VALUE; }
+    SafeHandle& operator=(SafeHandle&& o) noexcept { if (this != &o) { if (h_) CloseHandle(h_); h_ = o.h_; o.h_ = INVALID_HANDLE_VALUE; } return *this; }
+    SafeHandle(const SafeHandle&) = delete;
+    SafeHandle& operator=(const SafeHandle&) = delete;
+    HANDLE Get() const noexcept { return h_; }
+    bool Valid() const noexcept { return h_ && h_ != INVALID_HANDLE_VALUE; }
+private:
+    HANDLE h_;
+};
+
+static std::string FormatWinError(DWORD err = GetLastError()) {
+    char buf[256] = {};
+    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, err, 0, buf, sizeof(buf), nullptr);
+    std::ostringstream ss;
+    ss << buf << " (0x" << std::hex << std::uppercase << err << ')';
+    return ss.str();
+}
+
+static std::wstring NarrowToWide(const std::string& s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_ACP, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring out(n, L'\0');
+    MultiByteToWideChar(CP_ACP, 0, s.c_str(), static_cast<int>(s.size()), out.data(), n);
+    return out;
+}
+
+static std::vector<BYTE> BuildFillBuffer(SIZE_T size, FillMode mode) {
+    std::vector<BYTE> buf(size);
+    switch (mode) {
+    case FillMode::Zeros: std::fill(buf.begin(), buf.end(), 0); break;
+    case FillMode::Ones: std::fill(buf.begin(), buf.end(), 0xFF); break;
+    case FillMode::Random: {
+        static thread_local std::mt19937 rng(std::random_device{}());
+        std::uniform_int_distribution<unsigned> dist(0, 255);
+        for (auto& b : buf) b = static_cast<BYTE>(dist(rng));
+        break;
+    }
+    }
+    return buf;
+}
+
+static bool IsRegionScannable(const MEMORY_BASIC_INFORMATION& mbi) {
+    if (mbi.State != MEM_COMMIT) return false;
+    if (mbi.Protect & PAGE_GUARD) return false;
+    if (mbi.Protect & PAGE_NOACCESS) return false;
+    constexpr DWORD WRITABLE_FLAGS = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    return (mbi.Protect & WRITABLE_FLAGS) != 0;
+}
+
+static bool OverwriteRemoteBytes(HANDLE hProcess, LPVOID address, SIZE_T size, FillMode mode, bool dryRun) {
+    if (dryRun || size == 0) return true;
+    auto fill = BuildFillBuffer(size, mode);
+    SIZE_T written = 0;
+    if (WriteProcessMemory(hProcess, address, fill.data(), size, &written) && written == size) return true;
+    DWORD oldProtect = 0;
+    if (!VirtualProtectEx(hProcess, address, size, PAGE_EXECUTE_READWRITE, &oldProtect)) return false;
+    bool ok = WriteProcessMemory(hProcess, address, fill.data(), size, &written) && written == size;
+    VirtualProtectEx(hProcess, address, size, oldProtect, &oldProtect);
+    return ok;
+}
+
+template<typename ForwardIt1, typename ForwardIt2>
+ForwardIt1 boyer_moore_search(ForwardIt1 first, ForwardIt1 last, ForwardIt2 pat_first, ForwardIt2 pat_last) {
+    if (first == last) return last;
+    using value_type = typename std::iterator_traits<ForwardIt1>::value_type;
+    std::array<size_t, 256> skip{};
+    size_t pat_len = std::distance(pat_first, pat_last);
+    for (size_t i = 0; i < 256; ++i) skip[i] = pat_len;
+    for (size_t i = 0; i < pat_len - 1; ++i) {
+        skip[static_cast<unsigned char>(*(pat_last - i - 1))] = pat_len - i - 1;
+    }
+    ForwardIt1 it = first;
+    while (it != last) {
+        it = std::search(it, last, pat_first, pat_last);
+        if (it == last) return last;
+        if (std::equal(pat_first, pat_last, it)) return it;
+        size_t to_skip = skip[static_cast<unsigned char>(*it)];
+        std::advance(it, to_skip);
+    }
+    return last;
+}
+
+static std::vector<ProcessEntry> EnumerateMatchingProcesses(const std::wstring& nameFilter) {
+    std::vector<ProcessEntry> results;
+    SafeHandle snap(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+    if (!snap.Valid()) return results;
+    PROCESSENTRY32W entry{ sizeof(entry) };
+    if (!Process32FirstW(snap.Get(), &entry)) return results;
+    do {
+        if (!nameFilter.empty() && _wcsicmp(nameFilter.c_str(), entry.szExeFile) != 0) continue;
+        results.push_back({ entry.th32ProcessID, entry.szExeFile });
+    } while (Process32NextW(snap.Get(), &entry));
+    return results;
+}
+
+static ScrubResult ScrubProcessMemory(HANDLE hProcess, LPCVOID startAddr, LPCVOID endAddr, const ScrubConfig& cfg) {
+    ScrubResult result;
+    std::vector<std::vector<BYTE>> asciiPatterns;
+    std::vector<std::wstring> widePatterns;
+    for (const auto& str : cfg.targetStrings) {
+        asciiPatterns.emplace_back(str.begin(), str.end());
+        widePatterns.push_back(NarrowToWide(str));
+    }
+
+    std::vector<BYTE> buffer;
+    buffer.reserve(500 * 1024 * 1024);
+    MEMORY_BASIC_INFORMATION mbi{};
+    LPCVOID cursor = startAddr;
+    size_t totalBytes = 0;
+
+    while (cursor < endAddr) {
+        if (VirtualQueryEx(hProcess, cursor, &mbi, sizeof(mbi)) != sizeof(mbi)) break;
+        result.regionsScanned++;
+        BYTE* regionBase = static_cast<BYTE*>(mbi.BaseAddress);
+
+        if (mbi.RegionSize > 1024 * 1024 * 1024ULL) {
+            result.regionsSkipped++;
+            cursor = regionBase + mbi.RegionSize;
+            continue;
+        }
+
+        if (!IsRegionScannable(mbi)) {
+            result.regionsSkipped++;
+            cursor = regionBase + mbi.RegionSize;
+            continue;
+        }
+
+        SIZE_T chunkSize = std::min(mbi.RegionSize, SIZE_T(500 * 1024 * 1024));
+        buffer.resize(chunkSize);
+        SIZE_T bytesRead = 0;
+        if (!ReadProcessMemory(hProcess, regionBase, buffer.data(), chunkSize, &bytesRead) || bytesRead == 0) {
+            cursor = regionBase + mbi.RegionSize;
+            continue;
+        }
+        buffer.resize(bytesRead);
+        totalBytes += bytesRead;
+
+        // ASCII
+        for (size_t p = 0; p < asciiPatterns.size(); ++p) {
+            const auto& pattern = asciiPatterns[p];
+            size_t patLen = pattern.size();
+            if (patLen == 0 || patLen > bytesRead) continue;
+            auto it = (patLen > 4) ? boyer_moore_search(buffer.begin(), buffer.end(), pattern.begin(), pattern.end())
+                : std::search(buffer.begin(), buffer.end(), pattern.begin(), pattern.end());
+            while (it != buffer.end()) {
+                SIZE_T offset = std::distance(buffer.begin(), it);
+                if (OverwriteRemoteBytes(hProcess, regionBase + offset, patLen, cfg.fillMode, cfg.dryRun)) {
+                    result.asciiMatches++;
+                    result.found = true;
+                }
+                else {
+                    result.writeFailures++;
+                }
+                it = std::search(it + patLen, buffer.end(), pattern.begin(), pattern.end());
+            }
+        }
+
+        // UTF16
+        size_t wcharCount = bytesRead / sizeof(wchar_t);
+        if (wcharCount > 0) {
+            const wchar_t* wideData = reinterpret_cast<const wchar_t*>(buffer.data());
+            for (size_t p = 0; p < widePatterns.size(); ++p) {
+                const auto& widePattern = widePatterns[p];
+                size_t wideLen = widePattern.size();
+                if (wideLen == 0 || wideLen > wcharCount) continue;
+                for (size_t i = 0; i <= wcharCount - wideLen; i += 2) {
+                    if (wmemcmp(&wideData[i], widePattern.c_str(), wideLen) == 0) {
+                        SIZE_T byteOffset = i * sizeof(wchar_t);
+                        SIZE_T byteSize = wideLen * sizeof(wchar_t);
+                        if (OverwriteRemoteBytes(hProcess, regionBase + byteOffset, byteSize, cfg.fillMode, cfg.dryRun)) {
+                            result.wideMatches++;
+                            result.found = true;
+                        }
+                        else {
+                            result.writeFailures++;
+                        }
+                    }
+                }
+            }
+        }
+
+        cursor = regionBase + mbi.RegionSize;
+    }
+
+    result.elapsedMs = GetTickCount64() - GetTickCount64();
+    result.bytesScanned = totalBytes;
+    return result;
+}
+
+static void EnableSeDebugPrivilege() {
+    HANDLE hToken = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) return;
+    SafeHandle token(hToken);
+    LUID luid{};
+    if (!LookupPrivilegeValueW(nullptr, SE_DEBUG_NAME, &luid)) return;
+    TOKEN_PRIVILEGES tp{};
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Luid = luid;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), nullptr, nullptr);
+}
+
+#define RED   "\033[31m"
+#define RESET "\033[0m"
+
+static void EnableConsole() {
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    GetConsoleMode(hOut, &mode);
+    SetConsoleMode(hOut, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+}
+
+static void PrintBanner() {
+    std::cout << RED;
+    std::cout << "____________  _____ _                            \n";
+    std::cout << "|  _  \\  _  \\/  __ \\ |                           \n";
+    std::cout << "| | | | | | || /  \\/ | ___  __ _ _ __   ___ _ __ \n";
+    std::cout << "| | | | | | || |   | |/ _ \\/ _` | '_ \\ / _ \\ '__|\n";
+    std::cout << "| |/ /| |/ / | \\__/\\ |  __/ (_| | | | |  __/ |   \n";
+    std::cout << "|___/ |___/   \\____/_|\\__|\\__,_|_| |_|\\___|_|  \n";
+    std::cout << "\n                              made by Diff\n";
+    std::cout << RESET;
+}
+
+int main() {
+    EnableSeDebugPrivilege();
+    EnableConsole();
+
+    ScrubConfig cfg;
+    auto candidates = EnumerateMatchingProcesses(cfg.processName);
+
+    if (candidates.empty()) {
+        std::cout << "[-] No javaw.exe process found\n";
+        Sleep(3000);
+        return 1;
+    }
+
+    PrintBanner();
+    std::cout << "[+] javaw.exe (16 targets, Random fill)\n";
+
+    const auto& proc = candidates[0];
+    std::cout << "[+] Target: " << std::hex << proc.pid << " (" << std::dec << proc.pid << ")\n";
+
+    SafeHandle hProcess(OpenProcess(REQUIRED_ACCESS, FALSE, proc.pid));
+    if (!hProcess.Valid()) {
+        std::cout << "[-] OpenProcess failed: " << FormatWinError() << "\n";
+        return 1;
+    }
+
+    SYSTEM_INFO sysInfo{};
+    GetSystemInfo(&sysInfo);
+
+    std::cout << "[*] Scanning...\n";
+    auto start = GetTickCount64();
+    auto result = ScrubProcessMemory(hProcess.Get(), sysInfo.lpMinimumApplicationAddress, sysInfo.lpMaximumApplicationAddress, cfg);
+    auto elapsed = GetTickCount64() - start;
+
+    std::cout << "[+] Done in " << elapsed << "ms\n";
+    std::cout << "    Matches: " << result.TotalMatches() << " (ASCII:" << result.asciiMatches
+        << " UTF16:" << result.wideMatches << ")\n";
+    std::cout << "    Regions: " << result.regionsScanned << "/" << result.regionsScanned + result.regionsSkipped
+        << " Bytes: " << (result.bytesScanned / 1024 / 1024) << "MB\n";
+
+    system("pause");
+    return result.found ? 0 : 2;
+}
