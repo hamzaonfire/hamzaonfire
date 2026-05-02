@@ -34,6 +34,7 @@ std::vector<std::string> TARGET_STRINGS = {
     "%@])c@[u6g6mCf1(",
     "puMq^S^HZt",
     "mGaYm",
+    "Xsk#N",
 };
 
 constexpr DWORD REQUIRED_ACCESS = PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION;
