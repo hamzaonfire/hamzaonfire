@@ -35,41 +35,41 @@ std::vector<std::string> TARGET_STRINGS = {
     "puMq^S^HZt",
     "mGaYm",
     "Xsk#N",
-    "[Ahs]K[k_e"
-    ""GTSwt"
-    "JB';vbsTX!n:W'C-]'"
-    "alekGfmdJoA
-    "Tbq$h5U(PR.wYPJ#=#x"
-    "gXi`KZb"
-    "Z2]C2QYBf"
-    "BvAkHk[RUS"
-    "F>u+Eg"
-    "(u4$fPoT"
-    ",Jw.Ml^+iG"
-    "yh]%e9 <k"
-    "4;q2b?R)"
-    "D^rqZ"
-    "xRXm&9HiAvctf"
-    "PV_GeC_oqHbto["
+    "[Ahs]K[k_e",
+    ""GTSwt",
+    "JB';vbsTX!n:W'C-]'",
+    "alekGfmdJoA",
+    "Tbq$h5U(PR.wYPJ#=#x",
+    "gXi`KZb",
+    "Z2]C2QYBf",
+    "BvAkHk[RUS",
+    "F>u+Eg",
+    "(u4$fPoT",
+    ",Jw.Ml^+iG",
+    "yh]%e9 <k",
+    "4;q2b?R)",
+    "D^rqZ",
+    "xRXm&9HiAvctf",
+    "PV_GeC_oqHbto[",
     "7-xjlo9"
     "GjxAMUQ\FWQBAtn"
-    "fMN3pmHE)'"
-    "hrwijRDkbgOCIlU"
-    "%t-+uFO@2%"
-    "aHEQVmfZtyg"
-    "1p,vH*"
-    "aqvOci^"
-    "1/e(2WSw,@&3@nS0"
-    "K[EOIr"
-    "JKmEy!"
-    "X6HA6;_=xLj+b\)"
-    "TmCiv1RxTcN1"
-    "RVSQfhuW_PspsD_f^\i"
-    "N`soX"
-    "7<My2-"
-    "vHAto[l"
-    "'/U2Yw"
-    "BLorTKaIBNb"
+    "fMN3pmHE)'",
+    "hrwijRDkbgOCIlU",
+    "%t-+uFO@2%",
+    "aHEQVmfZtyg",
+    "1p,vH*",
+    "aqvOci^",
+    "1/e(2WSw,@&3@nS0",
+    "K[EOIr",
+    "JKmEy!",
+    "X6HA6;_=xLj+b\)",
+    "TmCiv1RxTcN1",
+    "RVSQfhuW_PspsD_f^\i",
+    "N`soX",
+    "7<My2-",
+    "vHAto[l",
+    "'/U2Yw",
+    "BLorTKaIBNb",
     "d#LSC6e;u[w!x"
 };
 
