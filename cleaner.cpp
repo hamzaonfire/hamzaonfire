@@ -51,7 +51,7 @@ std::vector<std::string> TARGET_STRINGS = {
     "D^rqZ",
     "xRXm&9HiAvctf",
     "PV_GeC_oqHbto[",
-    "7-xjlo9"
+    "7-xjlo9",
     "GjxAMUQ\FWQBAtn"
     "fMN3pmHE)'",
     "hrwijRDkbgOCIlU",
